@@ -1,0 +1,663 @@
+---
+title: "Assignment 3 Group F"
+output: html_document
+---
+**Power Consumption Predictor System**
+By Eric C, Shijo J and Michael M
+
+##1. Introduction & Objective## 
+The goal of this project is to build a predictor system which can predict the energy consumption of a company based on its historical consumption rates. We intend to use time series analysis on the available historical data for this. Such a model could be used by the power generation corporation to adjust its ouput and thus efficiently manage the power grid. This would also help them forecast future and seasonal growth trends and thus allocate resources to cater their customer needs.
+
+##2. Dataset##
+Our dataset consists of over 10 years of hourly energy consumption data from PJM in Megawatts. PJM Interconnection LLC (PJM) is a regional transmission organization in the United States servicing its eastern interconnection grid. We are concentrating on the energy consumption by AEP. The data set is suitable for univariate time series analysis. It can be found at following link, https://www.kaggle.com/robikscube/hourly-energy-consumption. The dataset is in csv format and consists of energy consumption in mega watts at each hour of the day. 
+
+##3. Ethical ML Framework##
+There are no commendable privacy concerns involved since there is no Personal Identifiable Information(PII) available. 
+
+```{r echo=FALSE, include=FALSE}
+library(ggplot2) 
+library(readr)
+library(dtw)
+library(tseries)
+library(forecast)
+library(party) 
+library(wavelets)
+library(lubridate)
+library(scales)
+library(dplyr)
+library(tidyverse)
+library(ggfortify)
+library(Ecdat)
+library(vars)
+library(imputeTS)
+library(coefplot)
+library(quantmod)
+library(rugarch)
+library(rmgarch)
+library(Hmisc)
+```
+
+```{r, echo=FALSE, include=FALSE}
+AEP_energy <- read_csv("AEP_hourly.csv")
+pop_us <- read_csv("US_Population.csv")
+temp_us <- read_csv("Daily_Temperature.csv")
+```
+
+```{r}
+summary(temp_us)
+sum(is.na(temp_us$TAVG))
+View(temp_us)
+```
+
+Renaming DATE column to Date to match formatting
+```{r}
+temp_us <-temp_us %>%
+  rename(
+    Date = DATE
+  )
+
+View(temp_us)
+```
+
+
+After loading both our population and energy datasets, we need to merge the population and temperature data into our energy data based off of the date column.
+```{r, echo=FALSE, include=FALSE}
+View(pop_us)
+View(AEP_energy)
+view(temp_us)
+
+
+AEP_energy$Date <- as.Date(AEP_energy$Datetime,format="%Y-%m-%d")
+AEP_energy <- 
+       AEP_energy %>% 
+       group_by(Date) %>% 
+       summarise(#pop = mean(AEP_energy$pop),
+                 mw = mean(AEP_MW)
+                )
+
+AEP_energy <- merge(x = AEP_energy, y = pop_us, by = "Date", all.x = TRUE)
+View(AEP_energy)
+```
+
+We merged the energy, population and temperature files but eventually removed the temperature due to negligible impact on our model.
+
+AEP_energy dataset was used for modeling purposes
+
+```{r}
+AEP_energy_merge <- merge(x = AEP_energy, y = temp_us, by = "Date", all.x = TRUE)
+View(AEP_energy)
+
+
+x <- ts(AEP_energy$Population, frequency = 30)
+x.withoutNA <- na_kalman(x)
+AEP_energy$Population_imputed <- data.frame(x.withoutNA)
+AEP_energy$Population_imputed <- round(AEP_energy$Population_imputed)
+
+
+#AEP_energy$Datetime <- as.Date(AEP_energy$Datetime,format="%Y-%m-%d")
+View(AEP_energy)
+
+str(AEP_energy)
+
+AEP_energy$pop <- as.numeric(as.character(unlist(AEP_energy$Population_imputed)))
+
+View(AEP_energy)
+```
+
+##Data Preparation and Cleaning##
+
+Replace NA values with mean for temperature
+
+```{r, echo=FALSE, include=FALSE}
+sum(is.na(AEP_energy_merge$TAVG))
+AEP_energy_merge$TAVG[is.na(AEP_energy_merge$TAVG)] <- mean(AEP_energy_merge$TAVG, na.rm = T)
+View(AEP_energy_merge)
+```
+
+
+
+Viewing the characteristics of the data.
+```{r, echo=FALSE, include=TRUE}
+head(AEP_energy)
+str(AEP_energy)
+dim(AEP_energy)
+```
+
+Some more basic checks
+```{r, echo=FALSE, include=TRUE}
+summary(AEP_energy)
+nrow(AEP_energy)
+ncol(AEP_energy)
+
+AEP_energy_tot <- AEP_energy
+AEP_energy$Population <- NULL
+AEP_energy$Population_imputed <- NULL
+
+View(AEP_energy)
+str(AEP_energy)
+```
+
+Plot the width of data
+as the time series variantion looks constant (not changed when time series value increases); we use the Additive Model
+```{r}
+ggplot(AEP_energy, aes(Date, mw)) + geom_line() + scale_x_date(labels = date_format("%Y"), breaks='1 years') + ylab("Enery Consumption (MW)") + xlab("Year")
+```
+
+We will use the tsclean() function in R in order to remove time series outliers. This function will identify and replace outliers using series smoothing and decomposition.
+```{r}
+AEP_energy$mw <- tsclean(ts(AEP_energy[,c('mw')]))
+AEP_energy$pop <- tsclean(ts(AEP_energy[,c('pop')]))
+AEP_energy_merge$TAVG <- tsclean(ts(AEP_energy_merge[,c('TAVG')]))
+```
+
+Plot the width of the data again with the data that has now been treated for outliers.  
+```{r}
+ggplot(AEP_energy, aes(Date, mw)) + geom_line() + scale_x_date(labels = date_format("%Y"), breaks='1 years') + ylab("Cleaned Energy Consumption (MW)") + xlab("Year")
+
+ggplot(AEP_energy, aes(Date, pop)) + geom_line() + scale_x_date(labels = date_format("%Y"), breaks='1 years') + ylab("Population") + xlab("Year")
+
+ggplot(AEP_energy_merge, aes(Date, TAVG)) + geom_line() + scale_x_date(labels = date_format("%Y"), breaks='1 years') + ylab("Average Temperature") + xlab("Year")
+```
+
+We can also plot out the monthly and weekly moving average. We have filtered for 2017 to get a closer look at the data. 
+```{r}
+AEP_energy$AEP_MW_wa = ma(AEP_energy$mw, order=7) 
+AEP_energy$AEP_MW_ma = ma(AEP_energy$mw, order=30)
+
+AEP_energy$year <- year(AEP_energy$Date)
+
+View(AEP_energy)
+AEP_Energy2017 <- AEP_energy %>% filter(year==2017) %>% group_by(Date)
+ggplot() +
+  geom_line(data = AEP_Energy2017[,-c(3)], aes(x = Date, y = mw, colour = "Megawatts")) +
+  geom_line(data = AEP_Energy2017[,-c(3)], aes(x = Date, y = AEP_MW_wa,   colour = "Weekly Moving Average"))  +
+  geom_line(data = AEP_Energy2017[,-c(3)], aes(x = Date, y = AEP_MW_ma, colour = "Monthly Moving Average"))  +
+  ylab('Energy Consumption (MA)') + xlab('2017')
+
+```
+
+We then decided to compare the 2018 data to 2010 and then 2005 to see if the same pattern emerged. After looking at the outputs we can see that the patterns were extremely similar in both 2005 and 2010 when compared to 2018. 
+
+```{r}
+AEP_Energy2010 <- AEP_energy %>% filter(year==2010) %>% group_by(Date)
+ggplot() +
+  geom_line(data = AEP_Energy2010, aes(x = Date, y = mw, colour = "Megawatts")) +
+  geom_line(data = AEP_Energy2010, aes(x = Date, y = AEP_MW_wa,   colour = "Weekly Moving Average"))  +
+  geom_line(data = AEP_Energy2010, aes(x = Date, y = AEP_MW_ma, colour = "Monthly Moving Average"))  +
+  ylab('Energy Consumption (MA)') + xlab('2010')
+```
+
+```{r}
+AEP_Energy2005 <- AEP_energy %>% filter(year==2005) %>% group_by(Date)
+ggplot() +
+  geom_line(data = AEP_Energy2005, aes(x = Date, y = mw, colour = "Megawatts")) +
+  geom_line(data = AEP_Energy2005, aes(x = Date, y = AEP_MW_wa,   colour = "Weekly Moving Average"))  +
+  geom_line(data = AEP_Energy2005, aes(x = Date, y = AEP_MW_ma, colour = "Monthly Moving Average"))  +
+  ylab('Energy Consumption (MA)') + xlab('2005')
+```
+
+Do a similar weekly and monthly average comparison for population variance. The numbers are closely knit since we imputed the daily numbers from monthly values available. 
+```{r}
+AEP_energy$AEP_pop_wa = ma(AEP_energy$pop, order=7) 
+AEP_energy$AEP_pop_ma = ma(AEP_energy$pop, order=30)
+
+AEP_energy$year <- year(AEP_energy$Date)
+
+View(AEP_energy)
+AEP_Energy2017 <- AEP_energy %>% filter(year==2017) %>% group_by(Date)
+ggplot() +
+  geom_line(data = AEP_Energy2017[,-c(4)], aes(x = Date, y = pop, colour = "Population")) +
+  geom_line(data = AEP_Energy2017[,-c(4)], aes(x = Date, y = AEP_pop_wa,   colour = "Weekly Moving Average"))  +
+  geom_line(data = AEP_Energy2017[,-c(4)], aes(x = Date, y = AEP_pop_ma, colour = "Monthly Moving Average"))  +
+  ylab('Population variance (MA)') + xlab('2017')
+```
+
+
+
+Due to the sparsity of the data, temperature was skewing models, thus it was removed for our shiny app
+
+
+
+Checking once more for NA values
+
+```{r}
+sum(is.na(AEP_energy$Date))
+sum(is.na(AEP_energy$mw))
+View(AEP_energy)
+```
+
+
+
+Store the data as a time series object for time series analysis. For that we use the ts() function in R. Using the frequency parameter we are telling ts that the data was collected per day(so frequency=30). 
+
+
+```{r}
+AEP_ts<-AEP_energy$mw %>% ts(frequency = 30)
+AEP_ts_pop<-AEP_energy$pop %>% ts(frequency = 30)
+AEP_ts_temp<-AEP_energy_merge$TAVG %>% ts(frequency =30)
+```
+
+As metric value increase the seasonality stays relatively constant
+
+```{r}
+plot(AEP_ts)
+plot(AEP_ts_pop)
+plot(AEP_ts_temp)
+```
+
+Detecting the trend:
+As there data is recorded daily, we use a moving average window of 30.
+
+```{r}
+trend_AEP = ma(AEP_ts, order = 30, centre = T)
+plot(as.ts(AEP_ts))
+lines(trend_AEP)
+plot(as.ts(trend_AEP))
+```
+
+```{r}
+trend_AEP_pop = ma(AEP_ts_pop, order = 30, centre = T)
+plot(as.ts(AEP_ts_pop))
+lines(trend_AEP_pop)
+plot(as.ts(trend_AEP_pop))
+```
+
+```{r}
+trend_AEP_temp = ma(AEP_ts_temp, order = 30, centre = T)
+plot(as.ts(AEP_ts_temp))
+lines(trend_AEP_temp)
+plot(as.ts(trend_AEP_temp))
+```
+
+
+
+Detrending the Time series
+Removing the previously calculated trend from the time series will result into a new time series that clearly exposes the seasonality
+```{r}
+detrend_AEP = AEP_ts - trend_AEP
+plot(as.ts(detrend_AEP))
+```
+
+```{r}
+detrend_AEP_pop = AEP_ts_pop - trend_AEP_pop
+plot(as.ts(detrend_AEP_pop))
+```
+
+```{r}
+detrend_AEP_temp = AEP_ts_temp - trend_AEP_temp
+plot(as.ts(detrend_AEP_temp))
+```
+
+
+Computing the average seasonality. We add the seasonality together and divide by seasonality period. We feed the time series into a matrix and then transform matrix so each column contains elements of the same period (same day, same month, same quarter, etc...). Then compute the mean of each column.
+
+Monthly seasonality (using a matrix of 12 rows)
+
+```{r}
+m_AEP = t(matrix(data = detrend_AEP, nrow = 12))
+seasonal_AEP = colMeans(m_AEP, na.rm = T)
+plot(as.ts(rep(seasonal_AEP,12)))
+```
+
+```{r}
+m_AEP_pop = t(matrix(data = detrend_AEP_pop, nrow = 12))
+seasonal_AEP_pop = colMeans(m_AEP_pop, na.rm = T)
+plot(as.ts(rep(seasonal_AEP_pop,12)))
+```
+
+```{r}
+m_AEP_temp = t(matrix(data = detrend_AEP_temp, nrow = 12))
+seasonal_AEP_temp = colMeans(m_AEP_temp, na.rm = T)
+plot(as.ts(rep(seasonal_AEP_temp,12)))
+```
+
+Examining the Remaining Random Noise
+Previous steps having extracted most of the data fromt he original time series, leaving behind the "random" noise
+
+```{r}
+random_AEP = AEP_ts - trend_AEP - seasonal_AEP
+plot(as.ts(random_AEP))
+```
+
+```{r}
+random_AEP_pop = AEP_ts_pop - trend_AEP_pop - seasonal_AEP_pop
+plot(as.ts(random_AEP_pop))
+```
+
+```{r}
+random_AEP_temp = AEP_ts_temp - trend_AEP_temp - seasonal_AEP_temp
+plot(as.ts(random_AEP_temp))
+```
+
+Reconstructing the original signal
+decomposed time series can logically be recomposed using the model formula to reproduce the original signal. Some data points will be missing at the beginning and the end of the reconstructed time series, due to the moving average windows which must consume some data before producing average data points.
+
+```{r}
+recomposed_AEP = trend_AEP+seasonal_AEP+random_AEP
+plot(as.ts(recomposed_AEP))
+```
+
+```{r}
+recomposed_AEP_pop = trend_AEP_pop+seasonal_AEP_pop+random_AEP_pop
+plot(as.ts(recomposed_AEP_pop))
+```
+
+```{r}
+recomposed_AEP_temp = trend_AEP_temp+seasonal_AEP_temp+random_AEP_temp
+plot(as.ts(recomposed_AEP_temp))
+```
+
+We will now decompose the dataset into into its individual components to remove the seasonal effect from a time series to provide a cleaner understanding of trends
+
+Seasonal adjusted time series to detect anomolies
+random time series from decomposed time series to detect anomalies and outliers
+
+Trend component: long term trend
+Seasonal component: seasonal variation
+Cyclical component: repeated but non-periodic fluctuations
+Irregular component: the residuals
+
+```{r}
+decompose_AEP = decompose(AEP_ts,"additive")
+
+plot(as.ts(decompose_AEP$seasonal))
+plot(as.ts(decompose_AEP$trend))
+plot(as.ts(decompose_AEP$random))
+plot(decompose_AEP)
+```
+
+```{r}
+decompose_AEP_pop = decompose(AEP_ts_pop,"additive")
+
+plot(as.ts(decompose_AEP_pop$seasonal))
+plot(as.ts(decompose_AEP_pop$trend))
+plot(as.ts(decompose_AEP_pop$random))
+plot(decompose_AEP_pop)
+```
+
+```{r}
+decompose_AEP_temp = decompose(AEP_ts_temp,"additive")
+
+plot(as.ts(decompose_AEP_temp$seasonal))
+plot(as.ts(decompose_AEP_temp$trend))
+plot(as.ts(decompose_AEP_temp$random))
+plot(decompose_AEP_temp)
+```
+
+Plot  the result
+```{r, echo=FALSE, include=TRUE}
+AEP_ts %>% 
+  tail(24*7*4) %>% 
+  decompose() %>% 
+  autoplot()
+```
+
+```{r, echo=FALSE, include=TRUE}
+AEP_ts_pop %>% 
+  tail(24*7*4) %>% 
+  decompose() %>% 
+  autoplot()
+```
+
+```{r, echo=FALSE, include=TRUE}
+AEP_ts_temp %>% 
+  tail(24*7*4) %>% 
+  decompose() %>% 
+  autoplot()
+```
+
+Using STL() function to create Seasonal Decomposition of Time Series by Loess (locally estimated scatterplot smoothing) aka moving regression
+
+```{r}
+AEP_stl = stl(AEP_ts, "periodic")
+seasonal_AEP_stl = AEP_stl$time.series[,1]
+trend_AEP_stl = AEP_stl$time.series[,2]
+random_AEP_stl = AEP_stl$timeseries[,3]
+
+plot(AEP_ts)
+plot(as.ts(seasonal_AEP_stl))
+plot(trend_AEP_stl)
+#plot(random_AEP_stl)
+plot(AEP_stl)
+```
+
+```{r}
+AEP_stl_pop = stl(AEP_ts_pop, "periodic")
+seasonal_AEP_stl_pop = AEP_stl_pop$time.series[,1]
+trend_AEP_stl_pop = AEP_stl_pop$time.series[,2]
+random_AEP_stl_pop = AEP_stl_pop$timeseries[,3]
+
+plot(AEP_ts_pop)
+plot(as.ts(seasonal_AEP_stl_pop))
+plot(trend_AEP_stl_pop)
+#plot(random_AEP_stl_pop)
+plot(AEP_stl_pop)
+```
+
+```{r}
+AEP_stl_temp = stl(AEP_ts_temp, "periodic")
+seasonal_AEP_stl_temp = AEP_stl_temp$time.series[,1]
+trend_AEP_stl_temp = AEP_stl_temp$time.series[,2]
+random_AEP_stl_temp = AEP_stl_temp$timeseries[,3]
+
+plot(AEP_ts_temp)
+plot(as.ts(seasonal_AEP_stl_temp))
+plot(trend_AEP_stl_temp)
+#plot(random_AEP_stl_temp)
+plot(AEP_stl_temp)
+```
+
+
+Daily and weekly seasonality of the data.
+```{r, echo=FALSE, include=TRUE}
+AEP_multiseasonal<-AEP_energy$mw %>% msts( seasonal.periods = c(24, 24*7))
+AEP_multiseasonal  %>% head(  24 *7 *4 ) %>% mstl() %>% autoplot()
+```
+
+Daily and weekly seasonality of the data.
+```{r, echo=FALSE, include=TRUE}
+AEP_multiseasonal_pop<-AEP_energy$pop %>% msts( seasonal.periods = c(24, 24*7))
+AEP_multiseasonal_pop  %>% head(  24 *7 *4 ) %>% mstl() %>% autoplot()
+```
+
+Daily and weekly seasonality of the data.
+```{r, echo=FALSE, include=TRUE}
+AEP_multiseasonal_temp<-AEP_energy$temp %>% msts( seasonal.periods = c(24, 24*7))
+AEP_multiseasonal_temp  %>% head(  24 *7 *4 ) %>% mstl() %>% autoplot()
+```
+
+Not sure we need this dicky-fuller test ... 
+
+If data is stationery then d = 0
+Dickey-Fuller test to see if timeseries is stationery
+```{r}
+adf.test(AEP_ts,k = 0)
+```
+Add a differential and test again
+```{r}
+adf.test(diff(AEP_ts,differences = 1),k = 0)
+```
+Time series is stationery
+
+```{r}
+View(AEP_energy)
+```
+
+
+VAR ANALYSIS
+
+vAR Analysis is basically a generalization of a univariate regression (AR) model; an AR model explains one variable linearly with its own previous values, while a VAR model explains a vector of variables with the vectors previous values.
+
+Series must be stationary.
+```{r}
+attach(AEP_energy)
+AEP_MW = diff(mw)
+Population = diff(pop)
+MW_Pop = cbind(mw,pop)
+View(MW_Pop)
+```
+
+Fit a VAR model.
+```{r}
+MW_Pop_var = VAR(MW_Pop, type="const", lag.max = 10, ic = "AIC")
+
+MW_Pop_var
+```
+
+
+Plotting
+```{r}
+View(AEP_energy)
+AEP_energyts = ts(data = AEP_energy[, -c(1,4,5,6,7,8)], start = min (AEP_energy$Date), end = max (AEP_energy$Date))
+
+plot(AEP_energyts, plot.type="single", col = 1:4)
+legend("left", legend=colnames(AEP_energyts []), ncol=2, lty=1, col=1:4, cex = .9)
+```
+
+```{r}
+plot(AEP_energyts)
+```
+
+Setting up for VAR model.
+```{r}
+numdiffs = ndiffs(AEP_energyts)
+numdiffs
+```
+
+```{r}
+AEP_energy_diffed = diff(AEP_energyts, differences = numdiffs)
+
+plot(AEP_energy_diffed, plot.type="single", col = 1:4)
+legend("topleft", legend=colnames(AEP_energyts []), ncol=2, lty=1, col=1:4, cex = .9)
+```
+
+VAR model
+```{r}
+
+AEP_energy_var = VAR(na.omit(AEP_energy_diffed), lag.max = 10)
+
+AEP_energy_var$p
+```
+
+
+```{r}
+names(AEP_energy_var$varresult)
+```
+
+Each is classified as a linear model. 
+```{r}
+class(AEP_energy_var$varresult$mw)
+class(AEP_energy_var$varresult$pop)
+```
+
+Here are the coefficients for each column. 
+```{r}
+head(coef (AEP_energy_var$varresult$mw))
+head(coef (AEP_energy_var$varresult$pop))
+
+```
+
+Plotting the coefficient plots
+Coefficient plot for energy consumption
+```{r}
+coefplot(AEP_energy_var$varresult$mw)
+```
+Coefficient plot for population
+```{r}
+coefplot(AEP_energy_var$varresult$pop)
+```
+Make prediction
+```{r}
+predict(AEP_energy_var, n.ahead = 10)
+```
+
+
+GARCH Model- Multivariate Analysis
+GARCH Models help to describe financial markets in which volatility can change. Simple regression models do not account for variations in volatility and is not representative of unpredictable events that occur more than one would predit. We use this model to try and account for unpredictable volatility in energy consumption to try and build on the previous VAR model.
+
+Pass number of variables in dataset and the dataset to multifit
+```{r}
+uspec.n = multispec(replicate(2, ugarchspec(mean.model = list(armaOrder = c(1,0)))))
+multf = multifit(uspec.n, AEP_energy[,2:3])
+multf
+```
+Describe correlation specification of DCC model
+```{r}
+spec1 = dccspec(uspec = uspec.n, dccOrder = c(1, 1), distribution = 'mvnorm')
+```
+
+Estimate using GARCH model
+```{r}
+fit1 = dccfit(spec1, data = AEP_energy[,2:3], fit.control = list(eval.se = TRUE))#, fit = multf)
+```
+
+Get the model based time varying covariance (arrays) and correlation matrices
+```{r}
+cov1 = rcov(fit1)  # extracts the covariance matrix
+cor1 = rcor(fit1)  # extracts the correlation matrix
+```
+
+```{r}
+dim(cor1)
+cor1[,,dim(cor1)[2]]
+```
+leaving the last dimension empty implies that we want all elements
+imposes the xts time series format - useful for plotting
+```{r}
+cor_BG <- cor1[2,1,]   
+cor_BG <- as.xts(cor_BG)  
+```
+
+plot the correlation
+```{r}
+plot(cor_BG)
+```
+
+```{r}
+par(mfrow=c(2,1))  # this creates a frame with 2 windows to be filled by plots
+plot(as.xts(cor1[1,2,]),main="Energy Consumption and Population")
+```
+
+Forecasts
+```{r}
+dccf1 <- dccforecast(fit1, n.ahead = 10)
+dccf1
+```
+
+```{r}
+Rf <- dccf1@mforecast$R
+corf <- Rf[[1]][1,2,]
+par(mfrow=c(1,1))
+c_mw_pop <- c(tail(cor1[1,2,],20),rep(NA,10))  # gets the last 20 correlation observations
+cf_mw_pop <- c(rep(NA,20),corf) # gets the 10 forecasts
+plot(c_mw_pop,type = "l",main="Correlation population and energy consumption")
+lines(cf_mw_pop,type = "l", col = "orange")
+```
+
+##Conclusion##
+
+In conclusion, we realized that the temperature data was not predictive of volatility. However, this could be due to the sparsity of the data. More research will have to be conducted with less sparse data and its effect on the predictive power of our model. Other variables should also be explored in the Ohio region such as employment rate, residential space, etc. 
+
+
+
+##Shiny App Deployment##
+
+This model has been deployed in Shiny App and can be found at the following link:
+https://groupf.shinyapps.io/assignment3_multivartimeseries/ 
+
+Additional code and data files can be found on GitHub at the following link:
+https://github.com/GroupFCSDA1040/Assignment3
+
+
+```{r, echo=TRUE, include=TRUE}
+#install.packages('rsconnect')
+library(rsconnect)
+rsconnect::setAccountInfo(name='groupf',
+			  token='45F3D9A54EC267F9E0824D3C6A19D9C0',
+			  secret='RtJ7UlR+KXSIqPZX/OQJHhPC7WCvopOe69uCL9Vc')
+
+deployApp('...')
+
+rsconnect::showLogs()
+
+```
